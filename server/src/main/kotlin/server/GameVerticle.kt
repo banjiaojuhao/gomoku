@@ -397,7 +397,7 @@ class GameVerticle : CoroutineVerticle() {
                 "update nickname" -> {
                     val name = request.getString("name", "default name")
                     vertx.eventBus().requestAwait<JsonObject>("game.server.nickname",
-                            jsonObjectOf("action" to "set", "name" to name))
+                            jsonObjectOf("action" to "set", "uuid" to uuid, "name" to name))
                     if (playerRoom != "") {
                         vertx.eventBus().send("game.server.match.$playerRoom",
                                 jsonObjectOf("action" to "update name", "uuid" to uuid, "name" to name))
