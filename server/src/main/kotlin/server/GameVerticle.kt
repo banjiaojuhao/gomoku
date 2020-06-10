@@ -17,9 +17,17 @@ class GameVerticle : CoroutineVerticle() {
 
         launch {
             uuid()
+        }
+        launch {
             nickname()
+        }
+        launch {
             online()
+        }
+        launch {
             room()
+        }
+        launch {
             login()
         }
     }
@@ -177,7 +185,7 @@ class GameVerticle : CoroutineVerticle() {
         val bothReady = Mutex(true)
 
         val end = AtomicBoolean(false)
-        var winner = 0
+        var winner: Int
         var board: IntArray
         var boardAvailable = 100
 
@@ -320,12 +328,13 @@ class GameVerticle : CoroutineVerticle() {
     private val noAction = "no action field in json"
 
     private suspend fun login() {
-        val consumer = vertx.eventBus().consumer<JsonObject>(clentPrefix)
+        val consumer = vertx.eventBus().consumer<JsonObject>("$clentPrefix.s")
         val channel = consumer.toChannel(vertx)
 
 
         for (msg in channel) {
             val request = msg.body()
+            println(request.toString())
             val action = request.getString("action", noAction)
             when (action) {
                 "new uuid" -> {
@@ -336,11 +345,13 @@ class GameVerticle : CoroutineVerticle() {
                     launch {
                         player(uuid)
                     }
-                    msg.reply(jsonObjectOf(
+                    val result = jsonObjectOf(
                             "action" to "new uuid",
                             "uuid" to uuid,
                             "nickname" to name
-                    ))
+                    )
+                    println(result.toString())
+                    msg.reply(result)
                 }
                 else -> {
                     msg.reply(jsonObjectOf(

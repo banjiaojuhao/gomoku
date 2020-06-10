@@ -15,7 +15,7 @@ class ServerVerticle : CoroutineVerticle() {
         val sockJSHandler = SockJSHandler.create(vertx,
                 sockJSHandlerOptionsOf(heartbeatInterval = 1000))
 
-        val permitAddress = permittedOptionsOf(addressRegex = "${clentPrefix.replace(".", "\\.")}.+")
+        val permitAddress = permittedOptionsOf(addressRegex = "${clentPrefix.replace(".", "\\.")}.*")
         val bridgeOption = bridgeOptionsOf(
                 inboundPermitted = listOf(permitAddress),
                 outboundPermitted = listOf(permitAddress)
