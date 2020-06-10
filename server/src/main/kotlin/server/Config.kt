@@ -1,3 +1,3 @@
 package server
 
-const val eventbusAddress = "game.player"
+const val clentPrefix = "game.player"

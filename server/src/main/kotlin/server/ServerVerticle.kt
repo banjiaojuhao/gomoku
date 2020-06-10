@@ -14,8 +14,8 @@ class ServerVerticle : CoroutineVerticle() {
 
         val sockJSHandler = SockJSHandler.create(vertx,
                 sockJSHandlerOptionsOf(heartbeatInterval = 1000))
-        // todo add sub channel
-        val permitAddress = permittedOptionsOf(eventbusAddress)
+
+        val permitAddress = permittedOptionsOf(addressRegex = "${clentPrefix.replace(".", "\\.")}.+")
         val bridgeOption = bridgeOptionsOf(
                 inboundPermitted = listOf(permitAddress),
                 outboundPermitted = listOf(permitAddress)

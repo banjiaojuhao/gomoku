@@ -6,7 +6,10 @@ import io.vertx.kotlin.core.json.jsonObjectOf
 import io.vertx.kotlin.coroutines.CoroutineVerticle
 import io.vertx.kotlin.coroutines.toChannel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.*
+import java.util.concurrent.atomic.AtomicBoolean
 
 class GameVerticle : CoroutineVerticle() {
     override suspend fun start() {
@@ -135,10 +138,10 @@ class GameVerticle : CoroutineVerticle() {
                         }
                     }
                     launch {
-                        val inRoom = vertx.eventBus().requestAwait<JsonObject>("game.server.match.$roomId",
+                        val color = vertx.eventBus().requestAwait<JsonObject>("game.server.match.$roomId",
                                 jsonObjectOf("action" to "enter", "uuid" to uuid))
-                                .body().getBoolean("in_room")
-                        msg.reply(jsonObjectOf("in_room" to inRoom))
+                                .body().getString("color")
+                        msg.reply(jsonObjectOf("color" to color))
                     }
                 }
                 "leave" -> {
@@ -158,19 +161,157 @@ class GameVerticle : CoroutineVerticle() {
         }
     }
 
+    data class Player(var uuid: String = "", var ready: Boolean = false, val color: String, val opponent: Int)
+
     private suspend fun match(roomId: String) {
         val consumer = vertx.eventBus().consumer<JsonObject>("game.server.match.$roomId")
         val channel = consumer.toChannel(vertx)
 
+        val timeout = 30
+
+        val players = arrayListOf(
+                Player(color = "black", opponent = 2),
+                Player(color = "white", opponent = 1)
+        )
+
+        val bothReady = Mutex(true)
+
+        val end = AtomicBoolean(false)
+        var winner = 0
+        var board: IntArray
+        var boardAvailable = 100
+
+        fun IntArray.get(x: Int, y: Int): Int {
+            return this[x * 10 + y]
+        }
+
+        fun IntArray.set(x: Int, y: Int, value: Int) {
+            this[x * 10 + y] = value
+        }
+
+        fun IntArray.win(x: Int, y: Int): Boolean {
+            val player = this.get(x, y)
+            val directionList = arrayListOf<Pair<Int, Int>>(
+                    0 to 1, 1 to 0, 1 to 1, 1 to -1
+            )
+            for ((dx, dy) in directionList) {
+                var maxContinuation = 1
+                for (sign in arrayListOf(-1, 1)) {
+                    for (dd in 1..4) {
+                        if (this.get(x + dx * dd * sign, y + dy * dd * sign) == player) {
+                            maxContinuation++
+                        } else {
+                            break
+                        }
+                    }
+                }
+                if (maxContinuation > 4) {
+                    return true
+                }
+            }
+            return false
+        }
+
+        launch {
+            // start game
+            while (true) {
+                bothReady.lock()
+                end.set(false)
+                winner = 0
+                board = IntArray(100)
+
+                var currentPut = 1
+                while (true) {
+                    winner = players[currentPut - 1].opponent
+                    val put1 = withTimeoutOrNull(timeout * 1000L) {
+                        vertx.eventBus().send("$clentPrefix.${players[players[currentPut - 1].opponent - 1].uuid}.b",
+                                jsonObjectOf("action" to "opponent to put", "timeout" to timeout))
+                        vertx.eventBus().requestAwait<JsonObject>("$clentPrefix.${players[currentPut - 1].uuid}.b",
+                                jsonObjectOf("action" to "to put", "timeout" to timeout)).body()
+                    } ?: break
+
+                    val x = put1.getInteger("x")
+                    val y = put1.getInteger("y")
+
+                    if (board.get(x, y) != 0) {
+                        break
+                    }
+                    boardAvailable--
+                    board.set(x, y, currentPut)
+
+                    vertx.eventBus().send("$clentPrefix.${players[players[currentPut - 1].opponent - 1].uuid}.b",
+                            jsonObjectOf("action" to "put", "x" to x, "y" to y))
+
+                    if (board.win(x, y)) {
+                        winner = currentPut
+                        break
+                    }
+
+                    if (boardAvailable == 0) {
+                        winner = 0
+                        break
+                    }
+
+                    currentPut = if (currentPut == 1) 2 else 1
+                }
+                end.set(true)
+                val winnerName = if (winner > 0) {
+                    players[winner - 1].color
+                } else {
+                    "none"
+                }
+                for (player in players) {
+                    vertx.eventBus().send("$clentPrefix.${player.uuid}.b",
+                            jsonObjectOf("action" to "end", "winner" to winnerName))
+                }
+            }
+        }
+
         for (msg in channel) {
             val request = msg.body()
             val action = request.getString("action")
-            when(action) {
+            val uuid = request.getString("uuid")
+            when (action) {
                 "enter" -> {
-
+                    var success = false
+                    for (player in players) {
+                        if (player.uuid == "") {
+                            success = true
+                            player.uuid = uuid
+                            player.ready = true
+                            msg.reply(jsonObjectOf("color" to player.color))
+                            break
+                        }
+                    }
+                    if (!success) {
+                        msg.reply(jsonObjectOf("color" to "none"))
+                    }
+                    if (players[0].ready && players[1].ready) {
+                        bothReady.unlock()
+                    }
                 }
                 "leave" -> {
-
+                    for (player in players) {
+                        if (player.uuid == uuid) {
+                            player.uuid = ""
+                            winner = player.opponent
+                            end.set(true)
+                            break
+                        }
+                    }
+                }
+                "reset" -> {
+                    if (end.get()) {
+                        for (player in players) {
+                            if (player.uuid == uuid) {
+                                player.ready = true
+                                break
+                            }
+                        }
+                        if (players[0].ready && players[1].ready) {
+                            bothReady.unlock()
+                        }
+                    }
                 }
             }
         }
@@ -179,7 +320,7 @@ class GameVerticle : CoroutineVerticle() {
     private val noAction = "no action field in json"
 
     private suspend fun login() {
-        val consumer = vertx.eventBus().consumer<JsonObject>(eventbusAddress)
+        val consumer = vertx.eventBus().consumer<JsonObject>(clentPrefix)
         val channel = consumer.toChannel(vertx)
 
 
@@ -212,7 +353,7 @@ class GameVerticle : CoroutineVerticle() {
     }
 
     private suspend fun player(uuid: String) {
-        val consumer = vertx.eventBus().consumer<JsonObject>("$eventbusAddress.$uuid")
+        val consumer = vertx.eventBus().consumer<JsonObject>("$clentPrefix.$uuid.s")
         val channel = consumer.toChannel(vertx)
         var playerRoom = ""
 
@@ -234,12 +375,12 @@ class GameVerticle : CoroutineVerticle() {
                 "enter room" -> {
                     val roomId = request.getString("id")
                     playerRoom = roomId
-                    val inRoom = vertx.eventBus().requestAwait<JsonObject>("game.server.room",
+                    val color = vertx.eventBus().requestAwait<JsonObject>("game.server.room",
                             jsonObjectOf("action" to "enter", "uuid" to uuid, "id" to roomId))
-                            .body().getBoolean("in_room")
+                            .body().getString("color")
                     msg.reply(jsonObjectOf(
                             "action" to "enter room",
-                            "in_room" to inRoom
+                            "color" to color
                     ))
                 }
                 "leave room" -> {
