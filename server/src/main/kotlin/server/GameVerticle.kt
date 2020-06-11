@@ -199,7 +199,12 @@ class GameVerticle : CoroutineVerticle() {
         val end = AtomicBoolean(false)
 
         fun IntArray.get(x: Int, y: Int): Int {
-            return this[x * 10 + y]
+            val index = x * 10 + y
+            if (index !in 0..99) {
+                return -1;
+            } else {
+                return this[index]
+            }
         }
 
         fun IntArray.set(x: Int, y: Int, value: Int) {
