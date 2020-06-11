@@ -1,13 +1,15 @@
 package server
 
+import io.vertx.core.eventbus.ReplyException
+import io.vertx.core.eventbus.ReplyFailure
 import io.vertx.core.json.JsonObject
+import io.vertx.kotlin.core.eventbus.deliveryOptionsOf
 import io.vertx.kotlin.core.eventbus.requestAwait
+import io.vertx.kotlin.core.eventbus.unregisterAwait
 import io.vertx.kotlin.core.json.jsonObjectOf
 import io.vertx.kotlin.coroutines.CoroutineVerticle
 import io.vertx.kotlin.coroutines.toChannel
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.*
 import java.util.*
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -98,8 +100,6 @@ class GameVerticle : CoroutineVerticle() {
         val channel = consumer.toChannel(vertx)
         val lastRequestTimeMap = hashMapOf<String, Long>()
 
-        val timeout = 10000L
-
         for (msg in channel) {
             val request = msg.body()
             val action = request.getString("action")
@@ -111,7 +111,7 @@ class GameVerticle : CoroutineVerticle() {
                 "get" -> {
                     val reqTime = lastRequestTimeMap[uuid] ?: 0L
                     msg.reply(jsonObjectOf(
-                            "online" to ((System.currentTimeMillis() - reqTime) < timeout)
+                            "time_passed" to ((System.currentTimeMillis() - reqTime) / 1000L).toInt()
                     ))
                 }
             }
@@ -123,6 +123,7 @@ class GameVerticle : CoroutineVerticle() {
         val channel = consumer.toChannel(vertx)
 
         val playerRoomMap = hashMapOf<String, String>()
+        val roomUsage = hashMapOf<String, Int>()
         val roomSet = hashSetOf<String>()
 
         for (msg in channel) {
@@ -133,11 +134,16 @@ class GameVerticle : CoroutineVerticle() {
             when (action) {
                 "enter" -> {
                     if (uuid in playerRoomMap) {
-                        vertx.eventBus().send("game.server.match.${playerRoomMap[uuid]}",
+                        vertx.eventBus().send("game.server.room",
                                 jsonObjectOf("action" to "leave", "uuid" to uuid))
                     }
                     val roomId = request.getString("id")
                     playerRoomMap[uuid] = roomId
+                    if (roomId in roomUsage) {
+                        roomUsage[roomId] = roomUsage[roomId]!! + 1
+                    } else {
+                        roomUsage[roomId] = 1
+                    }
                     // create match
                     if (roomId !in roomSet) {
                         roomSet.add(roomId)
@@ -156,6 +162,13 @@ class GameVerticle : CoroutineVerticle() {
                     if (uuid in playerRoomMap) {
                         vertx.eventBus().send("game.server.match.${playerRoomMap[uuid]}",
                                 jsonObjectOf("action" to "leave", "uuid" to uuid))
+                        val roomId = playerRoomMap[uuid]!!
+                        roomUsage[roomId] = roomUsage[roomId]!! - 1
+                        if (roomUsage[roomId] == 0) {
+                            roomUsage.remove(roomId)
+
+                            roomSet.remove(roomId)
+                        }
                         playerRoomMap.remove(uuid)
                     }
                 }
@@ -176,18 +189,14 @@ class GameVerticle : CoroutineVerticle() {
         val channel = consumer.toChannel(vertx)
 
         val timeout = 30
+        var matchRoutine: Job? = null
 
         val players = arrayListOf(
                 Player(color = "black", opponent = 2),
                 Player(color = "white", opponent = 1)
         )
 
-        val bothReady = Mutex(true)
-
         val end = AtomicBoolean(false)
-        var winner: Int
-        var board: IntArray
-        var boardAvailable = 100
 
         fun IntArray.get(x: Int, y: Int): Int {
             return this[x * 10 + y]
@@ -220,25 +229,38 @@ class GameVerticle : CoroutineVerticle() {
             return false
         }
 
-        launch {
-            // start game
-            while (true) {
-                bothReady.lock()
-                players[0].ready = false
-                players[1].ready = false
-                end.set(false)
-                winner = 0
-                board = IntArray(100)
+        suspend fun oneMatch() {
+            end.set(false)
+            players[0].ready = false
+            players[1].ready = false
+            var winner = 0
+            val board = IntArray(100)
+            var boardAvailable = 100
 
+            try {
                 var currentPut = 1
+                matching@
                 while (true) {
                     winner = players[currentPut - 1].opponent
-                    val put1 = withTimeoutOrNull(timeout * 1000L) {
-                        vertx.eventBus().send("$clentPrefix.${players[players[currentPut - 1].opponent - 1].uuid}.b",
-                                jsonObjectOf("action" to "opponent to put", "timeout" to timeout))
-                        vertx.eventBus().requestAwait<JsonObject>("$clentPrefix.${players[currentPut - 1].uuid}.b",
-                                jsonObjectOf("action" to "to put", "timeout" to timeout)).body()
-                    } ?: break
+                    vertx.eventBus().send("$clentPrefix.${players[players[currentPut - 1].opponent - 1].uuid}.b",
+                            jsonObjectOf("action" to "opponent to put", "timeout" to timeout))
+                    val put1 = try {
+                        vertx.eventBus().requestAwait<JsonObject>(
+                                "$clentPrefix.${players[currentPut - 1].uuid}.b",
+                                jsonObjectOf("action" to "to put", "timeout" to timeout),
+                                deliveryOptionsOf(sendTimeout = timeout * 1000L)
+                        ).body()
+                    } catch (e: ReplyException) {
+                        when (e.failureType()) {
+                            ReplyFailure.TIMEOUT -> break@matching
+                            ReplyFailure.NO_HANDLERS -> break@matching
+                            else -> {
+                                println("error when request client for 'to put'")
+                                e.printStackTrace()
+                                break@matching
+                            }
+                        }
+                    }
 
                     val x = put1.getInteger("x")
                     val y = put1.getInteger("y")
@@ -264,16 +286,32 @@ class GameVerticle : CoroutineVerticle() {
 
                     currentPut = if (currentPut == 1) 2 else 1
                 }
+            } finally {
                 end.set(true)
+
+                if (players[0].uuid == "" && players[1].uuid == "") {
+                    winner = 0
+                } else if (players[0].uuid == "") {
+                    winner = 2
+                } else if (players[1].uuid == "") {
+                    winner = 1
+                }
+
                 val winnerName = if (winner > 0) {
                     players[winner - 1].color
                 } else {
                     "none"
                 }
-                for (player in players) {
-                    vertx.eventBus().send("$clentPrefix.${player.uuid}.b",
-                            jsonObjectOf("action" to "end", "winner" to winnerName))
+                withContext(NonCancellable){
+                    for (player in players) {
+                        if (player.uuid != "") {
+                            vertx.eventBus().send("$clentPrefix.${player.uuid}.b",
+                                    jsonObjectOf("action" to "end", "winner" to winnerName))
+                        }
+                    }
                 }
+
+                matchRoutine = null
             }
         }
 
@@ -296,7 +334,7 @@ class GameVerticle : CoroutineVerticle() {
                     if (!success) {
                         msg.reply(jsonObjectOf("color" to "none"))
                     }
-                    if (players[0].ready && players[1].ready) {
+                    if (players[0].uuid != "" && players[1].uuid != "") {
                         // send opponent nickname
                         val playerName1 = vertx.eventBus().requestAwait<JsonObject>("game.server.nickname",
                                 jsonObjectOf("action" to "get", "uuid" to players[0].uuid))
@@ -308,7 +346,6 @@ class GameVerticle : CoroutineVerticle() {
                                 jsonObjectOf("action" to "opponent nickname", "name" to playerName2))
                         vertx.eventBus().send("game.player.${players[1].uuid}.b",
                                 jsonObjectOf("action" to "opponent nickname", "name" to playerName1))
-                        bothReady.unlock()
                     }
                 }
                 "leave" -> {
@@ -316,10 +353,18 @@ class GameVerticle : CoroutineVerticle() {
                         if (player.uuid == uuid) {
                             player.uuid = ""
                             player.ready = false
-                            winner = player.opponent
                             end.set(true)
+                            val opponentUUID = players[player.opponent - 1].uuid
+                            if (opponentUUID != "") {
+                                vertx.eventBus().send("game.player.$opponentUUID.b",
+                                        jsonObjectOf("action" to "opponent nickname", "name" to "none"))
+                            }
+                            matchRoutine?.cancel()
                             break
                         }
+                    }
+                    if (players[0].uuid == "" && players[1].uuid == "") {
+                        consumer.unregisterAwait()
                     }
                 }
                 "reset" -> {
@@ -330,9 +375,6 @@ class GameVerticle : CoroutineVerticle() {
                                 break
                             }
                         }
-                        if (players[0].ready && players[1].ready) {
-                            bothReady.unlock()
-                        }
                     }
                 }
                 "update name" -> {
@@ -341,6 +383,13 @@ class GameVerticle : CoroutineVerticle() {
                     if (opponentUUID != "") {
                         vertx.eventBus().send("game.player.$opponentUUID.b",
                                 jsonObjectOf("action" to "opponent nickname", "name" to name))
+                    }
+                }
+            }
+            if (action == "enter" || action == "reset") {
+                if (players[0].ready && players[1].ready && matchRoutine == null) {
+                    matchRoutine = launch {
+                        oneMatch()
                     }
                 }
             }
@@ -389,6 +438,28 @@ class GameVerticle : CoroutineVerticle() {
         val consumer = vertx.eventBus().consumer<JsonObject>("$clentPrefix.$uuid.s")
         val channel = consumer.toChannel(vertx)
         var playerRoom = ""
+
+        launch {
+            // leave room after timeout
+            while (true) {
+                delay(1000L)
+
+                val lastTime = vertx.eventBus().requestAwait<JsonObject>("game.server.online",
+                        jsonObjectOf("action" to "get", "uuid" to uuid)
+                ).body().getInteger("time_passed")
+
+                if (lastTime > 45 && playerRoom != "") {
+                    vertx.eventBus().send("game.server.room",
+                            jsonObjectOf("action" to "leave", "uuid" to uuid))
+                    playerRoom = ""
+                }
+
+                if (lastTime > 60) {
+                    consumer.unregisterAwait()
+                    break
+                }
+            }
+        }
 
         for (msg in channel) {
             vertx.eventBus().send("game.server.online",
