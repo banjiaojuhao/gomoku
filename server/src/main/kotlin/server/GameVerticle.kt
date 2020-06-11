@@ -224,6 +224,8 @@ class GameVerticle : CoroutineVerticle() {
             // start game
             while (true) {
                 bothReady.lock()
+                players[0].ready = false
+                players[1].ready = false
                 end.set(false)
                 winner = 0
                 board = IntArray(100)
@@ -313,6 +315,7 @@ class GameVerticle : CoroutineVerticle() {
                     for (player in players) {
                         if (player.uuid == uuid) {
                             player.uuid = ""
+                            player.ready = false
                             winner = player.opponent
                             end.set(true)
                             break
