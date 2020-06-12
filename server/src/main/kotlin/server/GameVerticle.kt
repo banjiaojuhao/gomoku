@@ -449,6 +449,8 @@ class GameVerticle : CoroutineVerticle() {
         val channel = consumer.toChannel(vertx)
         var playerRoom = ""
 
+        println("player: started player $uuid")
+
         launch {
             // leave room after timeout
             while (true) {
@@ -465,6 +467,7 @@ class GameVerticle : CoroutineVerticle() {
                 }
 
                 if (lastTime > 60) {
+                    println("player: time out to exit player $uuid")
                     consumer.unregisterAwait()
                     break
                 }
@@ -476,6 +479,7 @@ class GameVerticle : CoroutineVerticle() {
                     jsonObjectOf("action" to "set", "uuid" to uuid))
 
             val request = msg.body()
+            println("player: $request")
             val action = request.getString("action", noAction)
             when (action) {
                 "update nickname" -> {
