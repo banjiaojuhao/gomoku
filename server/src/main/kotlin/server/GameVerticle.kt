@@ -175,6 +175,12 @@ class GameVerticle : CoroutineVerticle() {
                 "leave" -> {
                     leaveRoom(uuid)
                 }
+                "reset" -> {
+                    if (uuid in playerRoomMap) {
+                        vertx.eventBus().send("game.server.match.${playerRoomMap[uuid]}",
+                                jsonObjectOf("action" to "reset", "uuid" to uuid))
+                    }
+                }
                 // msg from match when both players leave
 //                "delete" -> {
 //                    val roomId = request.getString("id")
@@ -509,6 +515,10 @@ class GameVerticle : CoroutineVerticle() {
                     vertx.eventBus().send("game.server.room",
                             jsonObjectOf("action" to "leave", "uuid" to uuid))
                     playerRoom = ""
+                }
+                "reset" -> {
+                    vertx.eventBus().send("game.server.room",
+                            jsonObjectOf("action" to "reset", "uuid" to uuid))
                 }
                 else -> {
                     msg.reply(jsonObjectOf(
