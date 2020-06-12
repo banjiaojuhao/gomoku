@@ -126,6 +126,21 @@ class GameVerticle : CoroutineVerticle() {
         val roomUsage = hashMapOf<String, Int>()
         val roomSet = hashSetOf<String>()
 
+        fun leaveRoom(uuid: String) {
+            if (uuid in playerRoomMap) {
+                vertx.eventBus().send("game.server.match.${playerRoomMap[uuid]}",
+                        jsonObjectOf("action" to "leave", "uuid" to uuid))
+                val roomId = playerRoomMap[uuid]!!
+                roomUsage[roomId] = roomUsage[roomId]!! - 1
+                if (roomUsage[roomId] == 0) {
+                    roomUsage.remove(roomId)
+                    roomSet.remove(roomId)
+                }
+                playerRoomMap.remove(uuid)
+            }
+        }
+
+
         for (msg in channel) {
             val request = msg.body()
             val action = request.getString("action")
@@ -134,8 +149,7 @@ class GameVerticle : CoroutineVerticle() {
             when (action) {
                 "enter" -> {
                     if (uuid in playerRoomMap) {
-                        vertx.eventBus().send("game.server.room",
-                                jsonObjectOf("action" to "leave", "uuid" to uuid))
+                        leaveRoom(uuid)
                     }
                     val roomId = request.getString("id")
                     playerRoomMap[uuid] = roomId
@@ -159,28 +173,19 @@ class GameVerticle : CoroutineVerticle() {
                     }
                 }
                 "leave" -> {
-                    if (uuid in playerRoomMap) {
-                        vertx.eventBus().send("game.server.match.${playerRoomMap[uuid]}",
-                                jsonObjectOf("action" to "leave", "uuid" to uuid))
-                        val roomId = playerRoomMap[uuid]!!
-                        roomUsage[roomId] = roomUsage[roomId]!! - 1
-                        if (roomUsage[roomId] == 0) {
-                            roomUsage.remove(roomId)
-
-                            roomSet.remove(roomId)
-                        }
-                        playerRoomMap.remove(uuid)
-                    }
+                    leaveRoom(uuid)
                 }
                 // msg from match when both players leave
-                "delete" -> {
-                    val roomId = request.getString("id")
-                    roomSet.remove(roomId)
-                    msg.reply(jsonObjectOf())
-                }
+//                "delete" -> {
+//                    val roomId = request.getString("id")
+//                    roomSet.remove(roomId)
+//                    roomUsage.remove(roomId)
+//                    msg.reply(jsonObjectOf())
+//                }
             }
         }
     }
+
 
     data class Player(var uuid: String = "", var ready: Boolean = false, val color: String, val opponent: Int)
 
@@ -307,7 +312,7 @@ class GameVerticle : CoroutineVerticle() {
                 } else {
                     "none"
                 }
-                withContext(NonCancellable){
+                withContext(NonCancellable) {
                     for (player in players) {
                         if (player.uuid != "") {
                             vertx.eventBus().send("$clentPrefix.${player.uuid}.b",
