@@ -373,7 +373,7 @@ class GameVerticle : CoroutineVerticle() {
                             val opponentUUID = players[player.opponent - 1].uuid
                             if (opponentUUID != "") {
                                 vertx.eventBus().send("game.player.$opponentUUID.b",
-                                        jsonObjectOf("action" to "opponent nickname", "name" to "none"))
+                                        jsonObjectOf("action" to "opponent nickname", "name" to null))
                             }
                             matchRoutine?.cancel()
                             break
